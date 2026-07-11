@@ -13,6 +13,24 @@ It emulates only the bare minimum necessary for software cross-development on th
 
 No graphics card and no floppy emulation at present.
 
+## Running
+
+Run the emulator from the `bin/` directory, since the defaults are resolved relative to the working directory:
+
+```sh
+cd bin
+./c900
+```
+
+The command line accepts the following arguments:
+
+- `--firmware=DIR` — directory holding the BIOS ROMs `bios_h.bin` and `bios_l.bin` (default `../rom`).
+- `--disk=FILE` — raw hard-disk image (default `../disk/hdd.bin`). A hard disk is mandatory; the emulator exits with an error if the image can't be opened.
+- `--trace` — print periodic PC/FCW progress to stderr.
+- `--max=N` — stop after N instructions (0, the default, runs until Ctrl-]).
+- `--input="..."` — feed scripted console keystrokes, with `\r`, `\n`, `\t`, and `\\` escapes.
+- `--selftest` — run the built-in CPU/ALU regression and exit (needs neither ROM nor disk).
+
 ## Building
 
 To build the emulator, simply type `make`. gcc is used for compilation, but since the C files are straight C99, other compilers should work too.
