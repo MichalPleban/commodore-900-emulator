@@ -164,11 +164,17 @@ void scc_rx_console(Machine *m, uint8_t b){
     m->scc_b.rx_data = b; m->scc_b.rx_avail = true;
 }
 
-/* ─────────────── HDC command-block processing (doorbell) ─────────────── */
-static void hdc_doorbell(Machine *m){
-    uint32_t cb = m->hdc_cmdblk;
-    uint8_t err = phys_read8(m, cb + 0x0C);
-    if (err != 0xFF) return;                 /* not armed for us (or FDC's) */
+/* ─────────────── HDC/FDC command-block processing (doorbell) ───────────────
+ * The disk-controller card carries both the WD2010 hard-disk MCU and the
+ * Commodore floppy controller. They share one PDMAC doorbell (port 0x0500)
+ * and one vectored interrupt (vector 0x80), but each owns a 16-byte SASI-style
+ * command block: the hard disk at hdc_cmdblk (default 0x080000) and the floppy
+ * immediately after it at hdc_cmdblk+0x10. A block is "armed" when its error
+ * byte (offset 0x0C) holds 0xFF; the controller overwrites it with a completion
+ * status and raises the interrupt. Both media address their data by linear
+ * block number, so this is a flat-file seek/copy for either one. */
+static void hdc_process(Machine *m, uint32_t cb, Disk *disk, bool is_floppy){
+    if (phys_read8(m, cb + 0x0C) != 0xFF) return;    /* not armed for this block */
     uint8_t opcode = phys_read8(m, cb + 0x00);
 
     uint8_t lunhi = phys_read8(m, cb + 0x01);
@@ -187,46 +193,55 @@ static void hdc_doorbell(Machine *m){
         case 0x01: /* Restore */
         case 0x05: /* CheckTrackFormat */
         case 0x03: /* RequestStatus */
-            status = m->disk.present ? 0x00 : 0x92;
+            /* 0x70 = "no floppy in drive" (FNOSENSE); 0x92 = HD not ready. */
+            status = disk->present ? 0x00 : (is_floppy ? 0x70 : 0x92);
             break;
-        case 0x0F: /* ChangeCmdBlockAddr — new base in DMA fields */
-            m->hdc_cmdblk = dma;
+        case 0x04: /* FormatDisk (floppy only) — no low-level format to model */
+            status = disk->present ? 0x80 : 0x70;
+            break;
+        case 0x0F: /* ChangeCmdBlockAddr — new base in DMA fields (hard disk) */
+            if (!is_floppy) m->hdc_cmdblk = dma;
             status = 0x00;
             break;
         case 0x08: /* Read */ {
-            if (!m->disk.present || lba + bcnt > m->disk.sectors) { status = 0x92; break; }
+            if (!disk->present)              { status = is_floppy ? 0x70 : 0x92; break; }
+            if (lba + bcnt > disk->sectors)  { status = 0x92; break; }
             uint32_t n = (uint32_t)bcnt * 512;
-            fseek(m->disk.fp, (long)lba * 512, SEEK_SET);
-            /* DMA target is always in DRAM (segs 0x08-0x17) — block-copy it. */
+            fseek(disk->fp, (long)lba * 512, SEEK_SET);
+            /* DMA target is always in DRAM (segs 0x08-0x17) — block-copy it.
+             * A partial image (trailing sectors trimmed) reads short; zero-fill
+             * the remainder so unwritten blocks read as zero, not stale RAM. */
             if (((dma>>16)&0xFF) >= 0x08 && (((dma+n-1)>>16)&0xFF) <= 0x17) {
                 if (watch_on < 0) watch_init();
                 if (watch_on && dma <= watch_hi && dma+n > watch_lo)
                     fprintf(stderr, "[watch] DMA %06X..%06X <- disk lba=%u insns=%llu\n",
                             dma, dma+n-1, lba, (unsigned long long)m->cpu.insns);
-                if (fread(m->ram + dma, 1, n, m->disk.fp) != n) {}
+                size_t got = fread(m->ram + dma, 1, n, disk->fp);
+                if (got < n) memset(m->ram + dma + got, 0, n - got);
             } else {
                 uint8_t buf[512];
                 for (uint32_t s=0; s<bcnt; s++){
-                    if (fread(buf,1,512,m->disk.fp) != 512) memset(buf,0,512);
+                    if (fread(buf,1,512,disk->fp) != 512) memset(buf,0,512);
                     for (int i=0;i<512;i++) phys_write8(m, dma + s*512 + i, buf[i]);
                 }
             }
             status = 0x80;
             break; }
         case 0x0A: /* Write */ {
-            if (!m->disk.present || lba + bcnt > m->disk.sectors) { status = 0x92; break; }
+            if (!disk->present)              { status = is_floppy ? 0x70 : 0x92; break; }
+            if (lba + bcnt > disk->sectors)  { status = 0x92; break; }
             uint32_t n = (uint32_t)bcnt * 512;
-            fseek(m->disk.fp, (long)lba * 512, SEEK_SET);
+            fseek(disk->fp, (long)lba * 512, SEEK_SET);
             if (((dma>>16)&0xFF) >= 0x08 && (((dma+n-1)>>16)&0xFF) <= 0x17) {
-                fwrite(m->ram + dma, 1, n, m->disk.fp);
+                fwrite(m->ram + dma, 1, n, disk->fp);
             } else {
                 uint8_t buf[512];
                 for (uint32_t s=0; s<bcnt; s++){
                     for (int i=0;i<512;i++) buf[i] = phys_read8(m, dma + s*512 + i);
-                    fwrite(buf,1,512,m->disk.fp);
+                    fwrite(buf,1,512,disk->fp);
                 }
             }
-            fflush(m->disk.fp);
+            fflush(disk->fp);
             status = 0x80;
             break; }
         default:
@@ -238,6 +253,16 @@ static void hdc_doorbell(Machine *m){
     phys_write8(m, cb + 0x0E, mid);
     /* raise the PDMAC disk-completion vectored interrupt (vector 0x80) */
     m->disk_vi = true;
+}
+
+/* Doorbell (out 0x0500,1): service whichever command block is armed. The hard
+ * disk sits at hdc_cmdblk; the floppy controller's block follows at +0x10. Both
+ * are always examined — the floppy controller is a fixed part of the card, so a
+ * command issued with no image attached completes with a "no floppy" status
+ * rather than leaving the driver waiting for an interrupt that never comes. */
+static void hdc_doorbell(Machine *m){
+    hdc_process(m, m->hdc_cmdblk, &m->disk, false);
+    hdc_process(m, m->hdc_cmdblk + 0x10, &m->floppy, true);
 }
 
 /* ─────────────── I/O dispatch ─────────────── */
@@ -373,6 +398,20 @@ int machine_attach_disk(Machine *m, const char *path){
     /* MiniScribe 20MB geometry (612×4×17) — matches the shipped images */
     m->disk.cyls = 612; m->disk.heads = 4; m->disk.spt = 17;
     m->disk.present = true;
+    return 0;
+}
+
+int machine_attach_floppy(Machine *m, const char *path){
+    FILE *f = fopen(path, "r+b");
+    if (!f) f = fopen(path, "rb");
+    if (!f) return -1;
+    m->floppy.fp = f;
+    /* One fixed C900 floppy format: NFBLK linearly-addressed blocks. The image
+     * may be shorter (trailing zero sectors trimmed); reads past EOF zero-fill,
+     * so present the full block count regardless of file length. */
+    m->floppy.sectors = FLOPPY_BLOCKS;
+    m->floppy.cyls = 80; m->floppy.heads = 2; m->floppy.spt = 16;
+    m->floppy.present = true;
     return 0;
 }
 

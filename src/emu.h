@@ -1,8 +1,8 @@
 /* emu.h — Commodore C900 classic (instruction-level) emulator.
  *
- * Zilog Z8001 CPU + Z8010 MMU, boot ROM, DRAM, WD2010-style hard disk (flat
- * file, DMA memcpy), and a Z8030 SCC serial console redirected to stdin/stdout.
- * No video, no GUI, no FDC.
+ * Zilog Z8001 CPU + Z8010 MMU, boot ROM, DRAM, WD2010-style hard disk plus an
+ * optional Commodore floppy (both flat files, DMA memcpy), and a Z8030 SCC
+ * serial console redirected to stdin/stdout. No video, no GUI.
  */
 #ifndef EMU_H
 #define EMU_H
@@ -250,13 +250,18 @@ typedef struct {
     uint8_t  rx_data;      /* last byte delivered to this channel's receiver */
 } SCCChan;
 
-/* Hard disk: flat file */
+/* Hard disk / floppy: flat file, one 512-byte sector per block */
 typedef struct {
     FILE    *fp;
     uint32_t sectors;    /* total 512-byte sectors */
     uint32_t cyls, heads, spt;
     bool     present;
 } Disk;
+
+/* Commodore floppy: 80 tracks × 2 sides, zone-bit density (16/15/14/13
+ * sectors per track) → NFBLK blocks addressed linearly, exactly the order a
+ * flat image file stores them in. */
+#define FLOPPY_BLOCKS 2392u
 
 struct Machine {
     CPU  cpu;
@@ -267,7 +272,8 @@ struct Machine {
     SCCChan scc_b;       /* console channel (AD5=0) */
     SCCChan scc_a;       /* second channel */
 
-    Disk disk;
+    Disk disk;           /* hard disk, command block at hdc_cmdblk */
+    Disk floppy;         /* optional floppy, command block at hdc_cmdblk+0x10 */
 
     /* PDMAC DMA address latch (23-bit) for HDC */
     uint32_t dma_addr;
@@ -313,6 +319,7 @@ struct Machine {
 Machine *machine_new(void);
 int  machine_load_rom(Machine *m, const char *dir);
 int  machine_attach_disk(Machine *m, const char *path);
+int  machine_attach_floppy(Machine *m, const char *path);
 void machine_run(Machine *m);
 
 /* physical memory access (post-translation) */

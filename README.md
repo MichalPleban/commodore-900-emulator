@@ -9,9 +9,10 @@ It emulates only the bare minimum necessary for software cross-development on th
 - Z8001 CPU + Z8010 MMU
 - 1 MB RAM
 - 20 MB hard drive
+- Optional floppy drive (see `--floppy` below)
 - One serial line, which redirects to the host console
 
-No graphics card and no floppy emulation at present.
+No graphics card at present.
 
 ## Running
 
@@ -22,14 +23,22 @@ cd bin
 ./c900
 ```
 
-The command line accepts the following arguments:
+The command line accepts the following arguments. Value options may be written either as `--opt=VALUE` or `--opt VALUE`:
 
 - `--firmware=DIR` — directory holding the BIOS ROMs `bios_h.bin` and `bios_l.bin` (default `../rom`).
 - `--disk=FILE` — raw hard-disk image (default `../disk/hdd.bin`). A hard disk is mandatory; the emulator exits with an error if the image can't be opened.
+- `--floppy=FILE` — raw floppy image, attached to the floppy drive (`/dev/fd1`). Optional; when omitted the floppy drive is empty. The image is a flat 512-byte-per-sector Coherent floppy (up to 2392 blocks); a short image has its trailing sectors read back as zeros.
 - `--trace` — print periodic PC/FCW progress to stderr.
 - `--max=N` — stop after N instructions (0, the default, runs until Ctrl-]).
 - `--input="..."` — feed scripted console keystrokes, with `\r`, `\n`, `\t`, and `\\` escapes.
 - `--selftest` — run the built-in CPU/ALU regression and exit (needs neither ROM nor disk).
+- `--help`, `-h` — print the option list and exit.
+
+For example, to boot with a floppy image attached:
+
+```sh
+./c900 --floppy ../disk/disk1_hr.bin
+```
 
 ## Building
 

@@ -1,12 +1,16 @@
 /* main.c — entry point + host console glue + CPU self-test.
  *
- * Usage:
- *   c900 [--firmware=DIR] [--disk=FILE] [--trace] [--max=N] [--input="..."]
+ * Usage (see usage() / --help for the full list):
+ *   c900 [--firmware=DIR] [--disk=FILE] [--floppy=FILE] [--trace] [--max=N] [--input="..."]
  *   c900 --selftest
+ *   c900 --help
+ * Value options accept both "--opt=VALUE" and "--opt VALUE".
  *
  * --firmware defaults to ../rom and --disk to ../disk/hdd.bin (both relative to
  * the working directory), so running the binary from the bin/ directory with no
  * arguments finds the ROMs and disk image in their sibling directories.
+ * --floppy is optional; when given it attaches a floppy image to the floppy
+ * drive (/dev/fd1 under the shipped Coherent image).
  *
  * The SCC channel B serial console is redirected to this process's stdin/
  * stdout, so the C900 boot ROM banner and any OS console appear directly in
@@ -125,25 +129,53 @@ static int selftest(void){
     return ok ? 0 : 1;
 }
 
+/* Print command-line usage. */
+static void usage(FILE *out, const char *prog){
+    fprintf(out,
+        "Usage: %s [options]\n"
+        "  --firmware=DIR   ROM directory with bios_h.bin + bios_l.bin (default ../rom)\n"
+        "  --disk=FILE      raw hard-disk image (default ../disk/hdd.bin; required)\n"
+        "  --floppy=FILE    raw floppy image for the floppy drive (optional)\n"
+        "  --trace          print periodic PC/FCW progress to stderr\n"
+        "  --max=N          stop after N instructions (0 = run until Ctrl-])\n"
+        "  --input=\"...\"    scripted console keystrokes (\\r \\n \\t \\\\ escapes)\n"
+        "  --selftest       run the built-in CPU/ALU regression and exit\n"
+        "  --help, -h       show this help and exit\n"
+        "\n"
+        "Value options accept either \"--opt=VALUE\" or \"--opt VALUE\".\n"
+        "Run from the bin/ directory so the ../rom and ../disk defaults resolve.\n",
+        prog);
+}
+
+/* Match a value-taking option in either "--name=VALUE" or "--name VALUE" form.
+ * Returns the value string, or NULL if argv[*i] is not this option. When the
+ * value is a separate argument, *i is advanced past it. */
+static const char *opt_value(char **argv, int argc, int *i, const char *name){
+    size_t n = strlen(name);
+    const char *a = argv[*i];
+    if (strncmp(a, name, n) != 0) return NULL;
+    if (a[n] == '=') return a + n + 1;                       /* --name=VALUE */
+    if (a[n] == '\0' && *i + 1 < argc) return argv[++(*i)];  /* --name VALUE */
+    return NULL;
+}
+
 int main(int argc, char **argv){
-    /* --- argument parsing ---------------------------------------------------
-     * --firmware=DIR  directory with bios_h.bin + bios_l.bin (default ../rom)
-     * --disk=FILE     raw hard-disk image (default ../disk/hdd.bin; required)
-     * --trace         periodic PC/FCW progress to stderr
-     * --max=N         stop after N instructions (0 = run until Ctrl-])
-     * --input="..."   scripted console keystrokes (\r \n \t \\ escapes)
-     * --selftest      run the built-in CPU/ALU regression and exit */
-    const char *fw = "../rom", *disk = "../disk/hdd.bin", *g_input = NULL;
+    /* --- argument parsing (see usage() for the full option list) ------------
+     * Value options accept both "--opt=VALUE" and "--opt VALUE". */
+    const char *fw = "../rom", *disk = "../disk/hdd.bin", *floppy = NULL, *g_input = NULL;
     bool trace = false, dosel = false;
     unsigned long long g_max = 0;
     for (int i=1;i<argc;i++){
-        if (!strncmp(argv[i],"--firmware=",11)) fw = argv[i]+11;
-        else if (!strncmp(argv[i],"--disk=",7)) disk = argv[i]+7;
+        const char *v;
+        if      ((v = opt_value(argv,argc,&i,"--firmware"))) fw = v;
+        else if ((v = opt_value(argv,argc,&i,"--disk")))     disk = v;
+        else if ((v = opt_value(argv,argc,&i,"--floppy")))   floppy = v;
+        else if ((v = opt_value(argv,argc,&i,"--max")))      g_max = strtoull(v,0,0);
+        else if ((v = opt_value(argv,argc,&i,"--input")))    g_input = v;
         else if (!strcmp(argv[i],"--trace")) trace = true;
-        else if (!strncmp(argv[i],"--max=",6)) g_max = strtoull(argv[i]+6,0,0);
-        else if (!strncmp(argv[i],"--input=",8)) g_input = argv[i]+8;
         else if (!strcmp(argv[i],"--selftest")) dosel = true;
-        else { fprintf(stderr,"unknown arg: %s\n", argv[i]); return 2; }
+        else if (!strcmp(argv[i],"--help") || !strcmp(argv[i],"-h")) { usage(stdout, argv[0]); return 0; }
+        else { fprintf(stderr,"unknown arg: %s\n\n", argv[i]); usage(stderr, argv[0]); return 2; }
     }
 
     if (dosel) return selftest();
@@ -156,6 +188,10 @@ int main(int argc, char **argv){
     }
     if (machine_attach_disk(m, disk) != 0) {
         fprintf(stderr,"failed to open hard-disk image %s (the machine requires a hard disk)\n", disk);
+        return 1;
+    }
+    if (floppy && machine_attach_floppy(m, floppy) != 0) {
+        fprintf(stderr,"failed to open floppy image %s\n", floppy);
         return 1;
     }
 
