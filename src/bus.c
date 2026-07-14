@@ -148,8 +148,11 @@ static void scc_write(Machine *m, int chan, int addrReg, uint8_t v){
             /* The Coherent shell prompt is '#'.  Latch once the power-on tests
              * are well behind us so scripted input is fed to the shell, not to
              * some earlier boot-time read; count prompts so scripted input can
-             * wait for the shell to return after each command. */
-            if (v == '#' && m->cpu.insns > 10000000) { m->shell_up = true; m->prompt_seq++; }
+             * wait for the shell to return after each command.  The power-on
+             * diagnostics and kernel banner print no '#', and boot reaches the
+             * shell prompt at roughly 2-3M instructions, so 1M clears the
+             * diagnostics while still latching on that first real prompt. */
+            if (v == '#' && m->cpu.insns > 1000000) { m->shell_up = true; m->prompt_seq++; }
         }
         return;
     }
